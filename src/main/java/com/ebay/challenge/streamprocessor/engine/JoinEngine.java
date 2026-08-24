@@ -17,12 +17,15 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.ObjectUtils;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -73,6 +76,8 @@ public class JoinEngine {
     private final PendingPageViewMapper pendingPageViewMapper;
     private final ProcessedInputMapper processedInputMapper;
 
+    private final TransactionTemplate transactionTemplate;
+
     // lock for each partition
     // IMPORTANT: get stateAccessLock, then this partitionLock
     private final ConcurrentHashMap<Integer, ReentrantLock> partitionLocks = new ConcurrentHashMap<>();
@@ -85,9 +90,31 @@ public class JoinEngine {
      * CALLED ONLY BY StreamConsumerStarter
      * */
     public void restoreState(){
-        // todo: restore watermarks
-        // todo: restore clicks later than watermarks
-        // todo: restore pageviews
+        // restore watermarks
+        List<WatermarkStateMapper.WatermarkState> states = watermarkStateMapper.findAll();
+        for (WatermarkStateMapper.WatermarkState state : states) {
+            watermarkTracker.restoreWatermark(state.partition(), state.maxEventTime());
+        }
+
+        // restore clicks later than watermarks
+        List<AdClickEvent> activeClicks = clickStateMapper.findAllActive();
+        for (AdClickEvent click : activeClicks) {
+            clickStore.restoreClick(click);
+        }
+
+        // restore pageviews
+        List<PageViewEvent> pendingPageViews = pendingPageViewMapper.findAllPending();
+        for (PageViewEvent pageView : pendingPageViews) {
+            PendingPageview pending = pendingPageView.computeIfAbsent(pageView.getPartition(), ignored -> new PendingPageview());
+            pending.add(pageView);
+        }
+
+        // handle
+        List<Integer> partitions = new ArrayList<>(pendingPageView.keySet());
+        partitions.sort(Integer::compareTo);
+        for (Integer partition : partitions) {
+            findAttributionForPendingViews(partition);
+        }
     }
 
     /**
@@ -102,48 +129,55 @@ public class JoinEngine {
      * and remove them from pending after attribution(no matter gets attribution or not)
      * @param click the ad click event
      */
-    @Transactional
     public void processClick(AdClickEvent click) {
-        // todo: maybe a file output for too_late_clisks?
-
-        log.debug("Processing click: {}", click.getClickId());
-
         int partitionNo = click.getPartition();
 
+        // get lock, then do transaction
         Lock readLock = stateAccessLock.readLock();
-        Lock partitionLock = getPartitionLock(partitionNo);
+        ReentrantLock partitionLock = getPartitionLock(partitionNo);
+
         readLock.lock();
         partitionLock.lock();
 
         try {
-            boolean isTooLate = watermarkTracker.isTooLate(partitionNo, click.getEventTime());
-            if (isTooLate){
-                log.info("Click {} is too late for partition {} to process. The newest watermark for this partition is {}. Click information is: {}",
-                        click.getClickId(), partitionNo, watermarkTracker.getWatermark(partitionNo), click);
-                // todo:processedInputMapper.insertTerminalRecord();
-                return;
-            }
-
-            clickStateMapper.insertIfAbsent("ad_clicks", click);
-            watermarkStateMapper.upsertObserved(partitionNo, click.getEventTime(), Instant.now());
-
-            clickStore.addClick(click);
-            watermarkTracker.updateWatermark(partitionNo, click.getEventTime());
-
-            // handling pageview
-            findAttributionForPendingViews(partitionNo);
+            transactionTemplate.executeWithoutResult(status -> processClickInTransaction(partitionNo, click));
+        } catch (Exception e) {
+            // todo: reloadAfterRollback
+            throw e;
         } finally {
             partitionLock.unlock();
             readLock.unlock();
         }
+    }
 
+    private void processClickInTransaction(int partitionNo, AdClickEvent click) {
+        log.debug("Processing click: {}", click.getClickId());
+
+        boolean isTooLate = watermarkTracker.isTooLate(partitionNo, click.getEventTime());
+        if (isTooLate){
+            log.info("Click {} is too late for partition {} to process. The newest watermark for this partition is {}. Click information is: {}",
+                    click.getClickId(), partitionNo, watermarkTracker.getWatermark(partitionNo), click);
+            processedInputMapper.insertLateRecord("ad_clicks", click.getPartition(), click.getOffset(),
+                    "ad_clicks", click.getClickId(), click.getEventTime());
+            return;
+        }
+
+        // permanatize record
+        clickStateMapper.insertIfAbsent("ad_clicks", click);
+        watermarkStateMapper.upsertObserved(partitionNo, click.getEventTime(), Instant.now());
+
+        // update memory
+        clickStore.addClick(click);
+        watermarkTracker.updateWatermark(partitionNo, click.getEventTime());
+
+        // handling pageview, output
+        findAttributionForPendingViews(partitionNo);
     }
 
     /**
      * Process a page view event.
      * Find matching click and emit attributed page view.
      *
-     * TODO: Implement page view processing logic
      * - Check if event is too late using watermarkTracker
      * - Find attributable click from clickStore
      * - Create and emit AttributedPageView
@@ -151,46 +185,52 @@ public class JoinEngine {
      *
      * @param pageView the page view event
      */
-    @Transactional
     public void processPageView(PageViewEvent pageView) {
-        // TODO: Keep watermark semantics consistent with the shared
-// click/page-view partition watermark policy.
-        log.debug("Processing page view: {}", pageView.getEventId());
-
         int partitionNo = pageView.getPartition();
+
         Lock readLock = stateAccessLock.readLock();
-        Lock partitionLock = getPartitionLock(partitionNo);
+        ReentrantLock partitionLock = getPartitionLock(partitionNo);
+
         readLock.lock();
         partitionLock.lock();
 
         try {
-            boolean isTooLate = watermarkTracker.isTooLate(partitionNo, pageView.getEventTime());
-            if (isTooLate){
-                log.info("Page view {} is too late for partition {}. Watermark: {}", pageView.getEventId(), partitionNo, watermarkTracker.getWatermark(partitionNo));
-                // todo:processedInputMapper.insertTerminalRecord();
-                return;
-            }
-
-            pendingPageViewMapper.insertIfAbsent("page_views", pageView);
-            watermarkStateMapper.upsertObserved(partitionNo, pageView.getEventTime(), Instant.now());
-
-            PendingPageview pending = pendingPageView.computeIfAbsent(partitionNo, key -> {
-                return new PendingPageview();
-            });
-
-            pending.add(pageView);
-
-            watermarkTracker.updateWatermark(partitionNo, pageView.getEventTime());
-
-            // handling pageview
-            findAttributionForPendingViews(partitionNo);
+            transactionTemplate.executeWithoutResult(status -> processPageViewInTransaction(partitionNo, pageView));
+        } catch (Exception e) {
+            // todo: reloadAfterRollback
+            throw e;
         } finally {
             partitionLock.unlock();
             readLock.unlock();
         }
-
-        log.debug("Page view processed: {}", pageView.getEventId());
     }
+
+    private void processPageViewInTransaction(int partitionNo, PageViewEvent pageView) {
+        log.debug("Processing page view: {}", pageView.getEventId());
+
+        boolean isTooLate = watermarkTracker.isTooLate(partitionNo, pageView.getEventTime());
+        if (isTooLate){
+            log.info("Page view {} is too late for partition {}. Watermark: {}", pageView.getEventId(), partitionNo, watermarkTracker.getWatermark(partitionNo));
+            processedInputMapper.insertLateRecord("page_views", pageView.getPartition(), pageView.getOffset(),
+                    "page_views", pageView.getEventId(), pageView.getEventTime());
+            return;
+        }
+
+        pendingPageViewMapper.insertIfAbsent("page_views", pageView);
+        watermarkStateMapper.upsertObserved(partitionNo, pageView.getEventTime(), Instant.now());
+
+        PendingPageview pending = pendingPageView.computeIfAbsent(partitionNo, key -> {
+            return new PendingPageview();
+        });
+
+        pending.add(pageView);
+
+        watermarkTracker.updateWatermark(partitionNo, pageView.getEventTime());
+
+        // handling pageview
+        findAttributionForPendingViews(partitionNo);
+    }
+
 
     /**
      * Scheduled task to evict old clicks from state.
@@ -198,7 +238,6 @@ public class JoinEngine {
      *
      * - Evict clicks older than the watermark cutoff
      * - Use clickStore.evictOldClicks() with appropriate cutoff time
-     *
      *
      * clickStore.evictOldClicks() is a cross-partition deletion, watermark storage is partition-based,
      * I choose to use global_minimum_watermark to prevent asynchronous watermark updates between partitions
@@ -210,10 +249,6 @@ public class JoinEngine {
      */
     @Scheduled(fixedRate = 30000)
     public void evictOldClicks() {
-        // TODO: getGlobalMinimumWatermark() returns raw maximum event_time.
-// Subtract allowed lateness and the 30-minute retention window
-// before passing the cutoff to ClickStateStore.
-
         log.debug("Running state eviction");
 
         Lock writeLock = stateAccessLock.writeLock();
@@ -237,8 +272,6 @@ public class JoinEngine {
         }
 
     }
-
-
 
 
     /**
@@ -290,4 +323,7 @@ public class JoinEngine {
             pendingPageView.remove(partitionNo, pending);
         }
     }
+
+
+
 }

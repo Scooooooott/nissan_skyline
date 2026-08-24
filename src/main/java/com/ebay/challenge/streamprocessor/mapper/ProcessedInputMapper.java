@@ -30,7 +30,6 @@ public class ProcessedInputMapper {
             String eventType,
             String eventKey,
             Instant eventTime,
-            String payloadHash,
             String processingStatus,
             int attemptCount,
             Instant receivedAt,
@@ -46,7 +45,6 @@ public class ProcessedInputMapper {
                     rs.getString("event_type"),
                     rs.getString("event_key"),
                     nullableInstant(rs, "event_time_epoch_ms"),
-                    rs.getString("payload_hash"),
                     rs.getString("processing_status"),
                     rs.getInt("attempt_count"),
                     instant(rs, "received_at_epoch_ms"),
@@ -60,7 +58,6 @@ public class ProcessedInputMapper {
             String eventType,
             String eventKey,
             Instant eventTime,
-            String payloadHash,
             String processingStatus,
             Instant receivedAt,
             Instant processedAt
@@ -74,14 +71,13 @@ public class ProcessedInputMapper {
                     event_key,
                     event_time,
                     event_time_epoch_ms,
-                    payload_hash,
                     processing_status,
                     received_at,
                     received_at_epoch_ms,
                     processed_at,
                     processed_at_epoch_ms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(topic, partition_no, offset_no) DO NOTHING
                 """;
 
@@ -94,7 +90,6 @@ public class ProcessedInputMapper {
                 eventKey,
                 nullableText(eventTime),
                 nullableEpochMillis(eventTime),
-                payloadHash,
                 processingStatus,
                 receivedAt.toString(),
                 receivedAt.toEpochMilli(),
@@ -146,4 +141,15 @@ public class ProcessedInputMapper {
     private static Long nullableEpochMillis(Instant instant) {
         return instant == null ? null : instant.toEpochMilli();
     }
+
+
+    public void insertLateRecord(String topic, int partition, long offset,
+                                    String eventType, String eventKey, Instant eventTime) {
+        Instant processedAt = Instant.now();
+
+        boolean inserted = insertTerminalRecord(topic, partition, offset, eventType,
+                eventKey, eventTime, "DROPPED_LATE", processedAt, processedAt );
+    }
+
+
 }

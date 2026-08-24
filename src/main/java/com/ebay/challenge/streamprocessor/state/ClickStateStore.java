@@ -212,4 +212,27 @@ public class ClickStateStore {
     public long getTotalClickCount() {
         return currentClickCount.get();
     }
+
+
+    public void restoreClick(AdClickEvent click) {
+        if (ObjectUtils.isEmpty(click) || StringUtils.isBlank(click.getUserId())
+                || StringUtils.isBlank(click.getClickId()) || ObjectUtils.isEmpty(click.getEventTime())) {
+            throw new IllegalArgumentException("Cannot restore invalid click state: " + click);
+        }
+
+        String userId = click.getUserId();
+
+        clickHashMap.compute(userId, (key, clicks) -> {
+            if (clicks == null) {
+                clicks = new TreeSet<>(Comparator.comparing(AdClickEvent::getEventTime)
+                                                .thenComparing(AdClickEvent::getClickId));
+            }
+
+            if (clicks.add(click)) {
+                currentClickCount.incrementAndGet();
+            }
+
+            return clicks;
+        });
+    }
 }

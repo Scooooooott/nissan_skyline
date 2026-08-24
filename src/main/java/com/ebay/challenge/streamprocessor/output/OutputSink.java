@@ -79,8 +79,8 @@ public class OutputSink {
             throw new OutputSinkException("OutputSink.write: Cannot persist a null attributed page view, record:" + record);
         }
 
-        if ((StringUtils.isBlank(record.getAttributedCampaignId()) && StringUtils.isBlank(record.getAttributedClickId()))
-        || (!StringUtils.isBlank(record.getAttributedCampaignId()) && !StringUtils.isBlank(record.getAttributedClickId()))){
+        if ((!StringUtils.isBlank(record.getAttributedCampaignId()) && StringUtils.isBlank(record.getAttributedClickId()))
+        || (StringUtils.isBlank(record.getAttributedCampaignId()) && !StringUtils.isBlank(record.getAttributedClickId()))){
             throw new OutputSinkException("OutputSink.write: Attribution fields must be both null or both present, pageViewId:" + record.getPageViewId());
         }
     }

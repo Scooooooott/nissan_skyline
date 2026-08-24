@@ -139,5 +139,14 @@ public class WatermarkTracker {
         return minEventTime;
     }
 
+    public void restoreWatermark(int partition, Instant maxEventTime) {
+        if (maxEventTime == null) {
+            return;
+        }
+
+        watermarkMap.merge(partition, maxEventTime, (current, restored) ->
+                        restored.isAfter(current) ? restored : current);
+    }
+
 
 }
