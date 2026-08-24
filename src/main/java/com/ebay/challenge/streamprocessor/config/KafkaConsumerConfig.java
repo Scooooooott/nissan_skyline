@@ -1,5 +1,6 @@
 package com.ebay.challenge.streamprocessor.config;
 
+import com.ebay.challenge.streamprocessor.consumer.KafkaRecordDeadLetterRecoverer;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
@@ -11,7 +12,9 @@ import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.listener.ContainerProperties;
+import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.util.backoff.FixedBackOff;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -38,11 +41,26 @@ public class KafkaConsumerConfig {
     @Value("${kafka.consumer.concurrency:3}")
     private int concurrency;
 
+    @Value("${kafka.consumer.max-retries:3}")
+    private long maxRetries;
+
+    @Value("${kafka.consumer.retry-backoff-ms:1000}")
+    private long retryBackoffMs;
+
     @Bean
     public ObjectMapper objectMapper() {
         ObjectMapper mapper = new ObjectMapper();
         mapper.registerModule(new JavaTimeModule());
         return mapper;
+    }
+
+    @Bean
+    public DefaultErrorHandler kafkaErrorHandler(KafkaRecordDeadLetterRecoverer recoverer) {
+        FixedBackOff backOff = new FixedBackOff(retryBackoffMs, maxRetries);
+        DefaultErrorHandler errorHandler = new DefaultErrorHandler(recoverer, backOff);
+        errorHandler.setCommitRecovered(true);
+        errorHandler.setAckAfterHandle(true);
+        return errorHandler;
     }
 
     /**
@@ -92,17 +110,20 @@ public class KafkaConsumerConfig {
      * Configured for concurrent processing with manual acknowledgment.
      */
     @Bean
-    public ConcurrentKafkaListenerContainerFactory<String, String> adClickListenerContainerFactory() {
+    public ConcurrentKafkaListenerContainerFactory<String, String> adClickListenerContainerFactory(
+            DefaultErrorHandler kafkaErrorHandler) {
         ConcurrentKafkaListenerContainerFactory<String, String> factory =
             new ConcurrentKafkaListenerContainerFactory<>();
 
         factory.setConsumerFactory(adClickConsumerFactory());
+        factory.setCommonErrorHandler(kafkaErrorHandler);
 
         // Concurrency: one thread per partition (up to configured max)
         factory.setConcurrency(concurrency);
 
         // Manual acknowledgment for offset control
-        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL);
+        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
+        factory.getContainerProperties().setDeliveryAttemptHeader(true);
 
         // Preserve partition ordering within each partition
         factory.getContainerProperties().setMissingTopicsFatal(false);
@@ -123,17 +144,20 @@ public class KafkaConsumerConfig {
      * Configured for concurrent processing with manual acknowledgment.
      */
     @Bean
-    public ConcurrentKafkaListenerContainerFactory<String, String> pageViewListenerContainerFactory() {
+    public ConcurrentKafkaListenerContainerFactory<String, String> pageViewListenerContainerFactory(
+            DefaultErrorHandler kafkaErrorHandler) {
         ConcurrentKafkaListenerContainerFactory<String, String> factory =
             new ConcurrentKafkaListenerContainerFactory<>();
 
         factory.setConsumerFactory(pageViewConsumerFactory());
+        factory.setCommonErrorHandler(kafkaErrorHandler);
 
         // Concurrency: one thread per partition (up to configured max)
         factory.setConcurrency(concurrency);
 
         // Manual acknowledgment for offset control
-        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL);
+        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
+        factory.getContainerProperties().setDeliveryAttemptHeader(true);
 
         // Preserve partition ordering within each partition
         factory.getContainerProperties().setMissingTopicsFatal(false);

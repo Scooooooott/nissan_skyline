@@ -26,6 +26,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -41,9 +42,6 @@ import java.util.concurrent.locks.ReentrantLock;
  * TODO(recovery): after a transaction rollback, invalidate/reload the affected
  * partition's in-memory click, watermark, and pending-page-view state from DB
  * before Kafka retries the record.
- * TODO(idempotency): handle ClickStateMapper's INSERTED/REPLAY/DUPLICATE/CONFLICT
- * result explicitly; conflicting input must not mutate memory, must go to DLQ,
- * and a replay of an EVICTED row must be terminal without restoring it to memory.
  * TODO(partitioning): support independent topic partitioning and idle-partition
  * watermark coordination instead of relying on the current same-partition assumption.
  * <p>
@@ -137,7 +135,7 @@ public class JoinEngine {
      * and remove them from pending after attribution(no matter gets attribution or not)
      * @param click the ad click event
      */
-    public void processClick(AdClickEvent click) {
+    public String processClick(AdClickEvent click) {
         int partitionNo = click.getPartition();
 
         // get lock, then do transaction
@@ -148,7 +146,7 @@ public class JoinEngine {
         partitionLock.lock();
 
         try {
-            transactionTemplate.executeWithoutResult(status -> processClickInTransaction(partitionNo, click));
+            return transactionTemplate.execute(status -> processClickInTransaction(partitionNo, click));
         } catch (Exception e) {
             // todo: reloadAfterRollback
             throw e;
@@ -158,8 +156,23 @@ public class JoinEngine {
         }
     }
 
-    private void processClickInTransaction(int partitionNo, AdClickEvent click) {
+    private String processClickInTransaction(int partitionNo, AdClickEvent click) {
         log.debug("Processing click: {}", click.getClickId());
+
+        // if this msg is comsumed and finished before
+        Optional<ProcessedInputMapper.ProcessedInput> processedInput = processedInputMapper.findByOffset(
+                "ad_clicks", click.getPartition(), click.getOffset());
+        if (processedInput.isPresent()) {
+            log.debug("Skipping consumed click input: partition={}, offset={}, status={}",
+                    click.getPartition(), click.getOffset(), processedInput.get().processingStatus());
+            return "";
+        }
+
+        // if click_id already exists
+        Optional<String> existingStatus = clickStateMapper.classifyExisting(click);
+        if (existingStatus.isPresent()) {
+            return handleExistingClick(existingStatus.get(), click);
+        }
 
         boolean isTooLate = watermarkTracker.isTooLate(partitionNo, click.getEventTime());
         if (isTooLate){
@@ -167,11 +180,15 @@ public class JoinEngine {
                     click.getClickId(), partitionNo, watermarkTracker.getWatermark(partitionNo), click);
             processedInputMapper.insertLateRecord("ad_clicks", click.getPartition(), click.getOffset(),
                     "ad_clicks", click.getClickId(), click.getEventTime());
-            return;
+            return "";
         }
 
-        // todo: handle INSERTED/REPLAY/DUPLICATE/CONFLICT before updating memory.
-        clickStateMapper.insertIfAbsent("ad_clicks", click);
+        // if click_id already inserted or concurrently inserting into db
+        String insertStatus = clickStateMapper.insertIfAbsent("ad_clicks", click);
+        if (!ClickStateMapper.INSERTED.equals(insertStatus)) {
+            return handleExistingClick(insertStatus, click);
+        }
+
         watermarkStateMapper.upsertObserved(partitionNo, click.getEventTime(), Instant.now());
 
         // update memory
@@ -183,6 +200,22 @@ public class JoinEngine {
 
         processedInputMapper.insertProcessedRecord("ad_clicks", click.getPartition(), click.getOffset(),
                 "ad_clicks", click.getClickId(), click.getEventTime());
+
+        return "";
+    }
+
+    private String handleExistingClick(String status, AdClickEvent click) {
+        if (ClickStateMapper.REPLAY.equals(status) || ClickStateMapper.DUPLICATE.equals(status)) {
+            processedInputMapper.insertProcessedRecord("ad_clicks", click.getPartition(), click.getOffset(),
+                    "ad_clicks", click.getClickId(), click.getEventTime());
+            return status;
+        }
+
+        if (ClickStateMapper.CONFLICT.equals(status)) {
+            return ClickStateMapper.CONFLICT;
+        }
+
+        throw new IllegalStateException("Unsupported click state: " + status);
     }
 
     /**

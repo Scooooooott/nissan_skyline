@@ -2,7 +2,9 @@ package com.ebay.challenge.streamprocessor.consumer;
 
 import com.ebay.challenge.streamprocessor.engine.JoinEngine;
 import com.ebay.challenge.streamprocessor.infrastructure.InvalidKafkaRecordException;
+import com.ebay.challenge.streamprocessor.mapper.ClickStateMapper;
 import com.ebay.challenge.streamprocessor.mapper.DeadLetterEventMapper;
+import com.ebay.challenge.streamprocessor.mapper.ProcessedInputMapper;
 import com.ebay.challenge.streamprocessor.model.AdClickEvent;
 import com.ebay.challenge.streamprocessor.model.PageViewEvent;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -36,6 +38,7 @@ public class StreamConsumer {
     private final ObjectMapper objectMapper;
 
     private final DeadLetterEventMapper deadLetterEventMapper;
+    private final ProcessedInputMapper processedInputMapper;
 
     private static final String EVENT_TYPE_AD_CLICK = "ad_clicks";
     private static final String EVENT_TYPE_PAGE_VIEW = "page_views";
@@ -92,7 +95,10 @@ public class StreamConsumer {
             click.setOffset(record.offset());
 
             // Process the click through the join engine
-            joinEngine.processClick(click);
+            String processingStatus = joinEngine.processClick(click);
+            if (ClickStateMapper.CONFLICT.equals(processingStatus)) {
+                persistClickConflict(record, click);
+            }
 
             // Acknowledge the offset after successful processing
             acknowledgment.acknowledge();
@@ -108,10 +114,9 @@ public class StreamConsumer {
             // acknowledge, no retry
             acknowledgment.acknowledge();
         } catch (Exception e) {
-            // todo?: if retry > 3 times, add error into db
             // other exceptions
             log.error("StreamConsumer.consumeAdClick: Error processing ad_click, record:{}, exception:", record, e);
-            // Don't acknowledge -> retry
+            // Don't acknowledge -> retry 3 times, if doesnot work, save dead letter into db.
             throw new RuntimeException("Failed to process ad click", e);
         }
     }
@@ -185,11 +190,10 @@ public class StreamConsumer {
             // acknowledge, no retry
             acknowledgment.acknowledge();
         } catch (Exception e) {
-            // todo?: if retry > 3 times, add error into db
             // other exceptions
             log.error("StreamConsumer.consumePageView: Error processing page_view, record:{}, exception:", record, e);
-            // Don't acknowledge -> retry
-            throw new RuntimeException("Failed to process ad click", e);
+            // Don't acknowledge -> retry 3 times, if doesnot work, save dead letter into db.
+            throw new RuntimeException("Failed to process page view", e);
         }
     }
 
@@ -213,5 +217,24 @@ public class StreamConsumer {
             log.warn("Invalid Kafka record already exists in dead letter: topic={}, partition={}, offset={}, eventType={}",
                     record.topic(), record.partition(), record.offset(), eventType);
         }
+    }
+
+
+    /**
+     * When click conflict (same click_id, different body), save records into db
+     * - one into processed record, marked as consumed
+     * - one into dead letter, as error
+     * */
+    private void persistClickConflict(ConsumerRecord<String, String> record, AdClickEvent click) {
+        // insert into dead_letter
+        deadLetterEventMapper.insertIfAbsent(record.topic(), record.partition(), record.offset(),
+                EVENT_TYPE_AD_CLICK, click.getClickId(), click.getEventTime(), record.value(),
+                "CLICK_ID_CONFLICT", "The same click_id already exists with different content", 1, Instant.now());
+
+        processedInputMapper.insertDeadLetterRecord(record.topic(), record.partition(), record.offset(),
+                EVENT_TYPE_AD_CLICK, click.getClickId(), click.getEventTime(), 1);
+
+        log.warn("Conflicting click saved to dead letter: topic={}, partition={}, offset={}, clickId={}",
+                record.topic(), record.partition(), record.offset(), click.getClickId());
     }
 }

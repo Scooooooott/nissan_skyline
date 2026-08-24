@@ -62,6 +62,22 @@ public class ProcessedInputMapper {
             Instant receivedAt,
             Instant processedAt
     ) {
+        return insertTerminalRecord(topic, partition, offset, eventType, eventKey, eventTime,
+                processingStatus, receivedAt, processedAt, 1);
+    }
+
+    public boolean insertTerminalRecord(
+            String topic,
+            int partition,
+            long offset,
+            String eventType,
+            String eventKey,
+            Instant eventTime,
+            String processingStatus,
+            Instant receivedAt,
+            Instant processedAt,
+            int attemptCount
+    ) {
         String sql = """
                 INSERT INTO processed_input (
                     topic,
@@ -72,12 +88,13 @@ public class ProcessedInputMapper {
                     event_time,
                     event_time_epoch_ms,
                     processing_status,
+                    attempt_count,
                     received_at,
                     received_at_epoch_ms,
                     processed_at,
                     processed_at_epoch_ms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(topic, partition_no, offset_no) DO NOTHING
                 """;
 
@@ -91,6 +108,7 @@ public class ProcessedInputMapper {
                 nullableText(eventTime),
                 nullableEpochMillis(eventTime),
                 processingStatus,
+                attemptCount,
                 receivedAt.toString(),
                 receivedAt.toEpochMilli(),
                 nullableText(processedAt),
@@ -160,6 +178,15 @@ public class ProcessedInputMapper {
 
         insertTerminalRecord(topic, partition, offset, eventType,
                 eventKey, eventTime, "PROCESSED", processedAt, processedAt);
+    }
+
+    public void insertDeadLetterRecord(String topic, int partition, long offset,
+                                       String eventType, String eventKey, Instant eventTime,
+                                       int attemptCount) {
+        Instant processedAt = Instant.now();
+
+        insertTerminalRecord(topic, partition, offset, eventType,
+                eventKey, eventTime, "DEAD_LETTER", processedAt, processedAt, attemptCount);
     }
 
 }

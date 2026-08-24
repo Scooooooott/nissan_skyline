@@ -6,8 +6,11 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.Instant;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
@@ -24,21 +27,24 @@ public class ClickStateMapper {
     public static final String DUPLICATE = "DUPLICATE";
     public static final String CONFLICT = "CONFLICT";
 
-    private static final RowMapper<AdClickEvent> ROW_MAPPER =
-            (rs, rowNum) -> {
-                AdClickEvent click = AdClickEvent.builder()
-                        .userId(rs.getString("user_id"))
-                        .eventTime(Instant.ofEpochMilli(rs.getLong("event_time_epoch_ms")))
-                        .campaignId(rs.getString("campaign_id"))
-                        .clickId(rs.getString("click_id"))
-                        .build();
+    public record StoredClick(AdClickEvent click, String stateStatus) {
+    }
 
-                click.setPartition(rs.getInt("partition_no"));
-                click.setOffset(rs.getLong("offset_no"));
-                return click;
-            };
+    private static final RowMapper<AdClickEvent> ROW_MAPPER =
+            (rs, rowNum) -> mapClick(rs);
+
+    private static final RowMapper<StoredClick> STATE_ROW_MAPPER =
+            (rs, rowNum) -> new StoredClick(mapClick(rs), rs.getString("state_status"));
+
+    private static final RowMapper<StoredClick> HISTORY_ROW_MAPPER =
+            (rs, rowNum) -> new StoredClick(mapClick(rs), "ARCHIVED");
 
     public String insertIfAbsent(String sourceTopic, AdClickEvent click) {
+        Optional<StoredClick> existing = findByClickIdIncludingInactive(click.getClickId());
+        if (existing.isPresent()) {
+            return classify(existing.get().click(), click);
+        }
+
         String sql = """
                 INSERT INTO click_state (
                     click_id,
@@ -70,20 +76,27 @@ public class ClickStateMapper {
             return INSERTED;
         }
 
-        Optional<AdClickEvent> existing = findByClickId(click.getClickId());
+        existing = findByClickIdIncludingInactive(click.getClickId());
 
         if (existing.isEmpty()) {
             throw new IllegalStateException("click_id conflict detected but existing row cannot be loaded: " + click.getClickId());
         }
 
-        AdClickEvent stored = existing.get();
+        return classify(existing.get().click(), click);
+    }
 
-        boolean sameBusinessContent = (stored.getUserId().equals(click.getUserId()))
-                && (stored.getEventTime().equals(click.getEventTime()))
-                && (stored.getCampaignId().equals(click.getCampaignId()));
+    public Optional<String> classifyExisting(AdClickEvent click) {
+        return findByClickIdIncludingInactive(click.getClickId())
+                .map(existing -> classify(existing.click(), click));
+    }
 
-        boolean sameKafkaSource = (stored.getPartition() == click.getPartition())
-                && (stored.getOffset() == click.getOffset());
+    private String classify(AdClickEvent stored, AdClickEvent incoming) {
+        boolean sameBusinessContent = Objects.equals(stored.getUserId(), incoming.getUserId())
+                && Objects.equals(stored.getEventTime(), incoming.getEventTime())
+                && Objects.equals(stored.getCampaignId(), incoming.getCampaignId());
+
+        boolean sameKafkaSource = (stored.getPartition() == incoming.getPartition())
+                && (stored.getOffset() == incoming.getOffset());
 
         if (sameKafkaSource && sameBusinessContent) {
             return REPLAY;
@@ -97,14 +110,30 @@ public class ClickStateMapper {
     }
 
     public Optional<AdClickEvent> findByClickId(String clickId) {
-        String sql = """
+        return findByClickIdIncludingInactive(clickId)
+                .filter(existing -> "ACTIVE".equals(existing.stateStatus()))
+                .map(StoredClick::click);
+    }
+
+    public Optional<StoredClick> findByClickIdIncludingInactive(String clickId) {
+        String stateSql = """
                 SELECT *
                 FROM click_state
                 WHERE click_id = ?
-                  AND state_status = 'ACTIVE'
                 """;
 
-        return jdbcTemplate.query(sql, ROW_MAPPER, clickId)
+        List<StoredClick> stateRows = jdbcTemplate.query(stateSql, STATE_ROW_MAPPER, clickId);
+        if (!stateRows.isEmpty()) {
+            return Optional.of(stateRows.get(0));
+        }
+
+        String historySql = """
+                SELECT *
+                FROM click_history
+                WHERE click_id = ?
+                """;
+
+        return jdbcTemplate.query(historySql, HISTORY_ROW_MAPPER, clickId)
                 .stream()
                 .findFirst();
     }
@@ -150,5 +179,18 @@ public class ClickStateMapper {
                 updatedAt.toEpochMilli(),
                 cutoffTime.toEpochMilli()
         );
+    }
+
+    private static AdClickEvent mapClick(ResultSet rs) throws SQLException {
+        AdClickEvent click = AdClickEvent.builder()
+                .userId(rs.getString("user_id"))
+                .eventTime(Instant.ofEpochMilli(rs.getLong("event_time_epoch_ms")))
+                .campaignId(rs.getString("campaign_id"))
+                .clickId(rs.getString("click_id"))
+                .build();
+
+        click.setPartition(rs.getInt("partition_no"));
+        click.setOffset(rs.getLong("offset_no"));
+        return click;
     }
 }
