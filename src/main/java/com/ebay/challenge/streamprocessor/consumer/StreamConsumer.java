@@ -37,8 +37,8 @@ public class StreamConsumer {
 
     private final DeadLetterEventMapper deadLetterEventMapper;
 
-    private static final String EVENT_TYPE_AD_CLICK = "AD_CLICK";
-    private static final String EVENT_TYPE_PAGE_VIEW = "PAGE_VIEW";
+    private static final String EVENT_TYPE_AD_CLICK = "ad_clicks";
+    private static final String EVENT_TYPE_PAGE_VIEW = "page_views";
     private static final String ERROR_TYPE_INVALID_KAFKA_RECORD = "INVALID_KAFKA_RECORD";
 
     /**

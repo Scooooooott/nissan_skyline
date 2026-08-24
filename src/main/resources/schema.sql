@@ -32,9 +32,9 @@ CREATE TABLE IF NOT EXISTS processed_input (
                                                offset_no INTEGER NOT NULL,
 
                                                event_type TEXT NOT NULL
-                                               CHECK (event_type IN ('page_view', 'ad_click')),
+                                                CHECK (event_type IN ('page_views', 'ad_clicks')),
 
-    -- PAGE_VIEW uses event_id; AD_CLICK uses click_id.
+    -- PAGE_VIEWS uses event_id; AD_CLICKS uses click_id.
     event_key TEXT,
 
     event_time TEXT,
@@ -72,6 +72,58 @@ CREATE INDEX IF NOT EXISTS idx_processed_input_event_time
     ON processed_input(event_time_epoch_ms);
 
 
+CREATE TABLE IF NOT EXISTS processed_input_history (
+                                                       topic TEXT NOT NULL,
+                                                       partition_no INTEGER NOT NULL,
+                                                       offset_no INTEGER NOT NULL,
+
+                                                       event_type TEXT NOT NULL
+                                                       CHECK (event_type IN ('page_views', 'ad_clicks')),
+
+    event_key TEXT,
+
+    event_time TEXT,
+    event_time_epoch_ms INTEGER,
+
+    payload_hash TEXT,
+
+    processing_status TEXT NOT NULL
+    CHECK (processing_status IN (
+           'PROCESSED',
+           'DROPPED_LATE',
+           'DEAD_LETTER'
+                                )),
+
+    attempt_count INTEGER NOT NULL DEFAULT 1,
+
+    received_at TEXT NOT NULL
+    DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    received_at_epoch_ms INTEGER NOT NULL
+    DEFAULT (CAST(strftime('%s', 'now') AS INTEGER) * 1000),
+
+    processed_at TEXT,
+    processed_at_epoch_ms INTEGER,
+
+    archived_at TEXT NOT NULL
+    DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    archived_at_epoch_ms INTEGER NOT NULL
+    DEFAULT (CAST(strftime('%s', 'now') AS INTEGER) * 1000),
+
+    PRIMARY KEY (topic, partition_no, offset_no),
+
+    UNIQUE (topic, event_key)
+    );
+
+CREATE INDEX IF NOT EXISTS idx_processed_input_history_status
+    ON processed_input_history(processing_status);
+
+CREATE INDEX IF NOT EXISTS idx_processed_input_history_event_time
+    ON processed_input_history(event_time_epoch_ms);
+
+CREATE INDEX IF NOT EXISTS idx_processed_input_history_archived_at
+    ON processed_input_history(archived_at_epoch_ms);
+
+
 CREATE TABLE IF NOT EXISTS click_state (
                                            click_id TEXT PRIMARY KEY NOT NULL,
 
@@ -106,6 +158,44 @@ CREATE INDEX IF NOT EXISTS idx_click_state_user_time
 
 CREATE INDEX IF NOT EXISTS idx_click_state_status_time
     ON click_state(state_status, event_time_epoch_ms);
+
+
+CREATE TABLE IF NOT EXISTS click_history (
+                                             click_id TEXT PRIMARY KEY NOT NULL,
+
+                                             user_id TEXT NOT NULL,
+
+                                             event_time TEXT NOT NULL,
+                                             event_time_epoch_ms INTEGER NOT NULL,
+
+                                             campaign_id TEXT NOT NULL,
+
+                                             source_topic TEXT NOT NULL,
+                                             partition_no INTEGER NOT NULL,
+                                             offset_no INTEGER NOT NULL,
+
+                                             created_at TEXT NOT NULL
+                                             DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                                             created_at_epoch_ms INTEGER NOT NULL
+                                             DEFAULT (CAST(strftime('%s', 'now') AS INTEGER) * 1000),
+
+                                             updated_at TEXT NOT NULL
+                                             DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                                             updated_at_epoch_ms INTEGER NOT NULL
+                                             DEFAULT (CAST(strftime('%s', 'now') AS INTEGER) * 1000),
+
+                                             archived_at TEXT NOT NULL,
+                                             archived_at_epoch_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_click_history_user_time
+    ON click_history(user_id, event_time_epoch_ms DESC, click_id);
+
+CREATE INDEX IF NOT EXISTS idx_click_history_event_time
+    ON click_history(event_time_epoch_ms);
+
+CREATE INDEX IF NOT EXISTS idx_click_history_archived_at
+    ON click_history(archived_at_epoch_ms);
 
 
 CREATE TABLE IF NOT EXISTS pending_page_view (

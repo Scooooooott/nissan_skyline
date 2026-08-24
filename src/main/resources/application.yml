@@ -36,6 +36,11 @@ output:
 watermark:
   allowed-lateness-minutes: 2
 
+# Processed input history configuration
+processed-input-history:
+  migration-interval-ms: 86400000
+  migration-batch-size: 500
+
 # Logging Configuration
 logging:
   level:

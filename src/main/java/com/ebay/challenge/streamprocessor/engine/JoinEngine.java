@@ -62,6 +62,9 @@ import java.util.concurrent.locks.ReentrantLock;
  * doing so might lose some attributions about their last several minutes' pageview.)
  * Without one of these alter methods, this key setting may cause incorrect attribution or some pending page views could
  * not be finalized.
+ *
+ * TODO: Make sure that both topics use the same partition count and user_id partitioner,
+ * or replace numeric-partition coordination.
  */
 @Slf4j
 @Component
@@ -162,13 +165,13 @@ public class JoinEngine {
         if (isTooLate){
             log.info("Click {} is too late for partition {} to process. The newest watermark for this partition is {}. Click information is: {}",
                     click.getClickId(), partitionNo, watermarkTracker.getWatermark(partitionNo), click);
-            processedInputMapper.insertLateRecord("ad_click", click.getPartition(), click.getOffset(),
-                    "ad_click", click.getClickId(), click.getEventTime());
+            processedInputMapper.insertLateRecord("ad_clicks", click.getPartition(), click.getOffset(),
+                    "ad_clicks", click.getClickId(), click.getEventTime());
             return;
         }
 
         // todo: handle INSERTED/REPLAY/DUPLICATE/CONFLICT before updating memory.
-        clickStateMapper.insertIfAbsent("ad_click", click);
+        clickStateMapper.insertIfAbsent("ad_clicks", click);
         watermarkStateMapper.upsertObserved(partitionNo, click.getEventTime(), Instant.now());
 
         // update memory
@@ -178,8 +181,8 @@ public class JoinEngine {
         // handling pageview, output
         findAttributionForPendingViews(partitionNo);
 
-        processedInputMapper.insertProcessedRecord("ad_click", click.getPartition(), click.getOffset(),
-                "ad_click", click.getClickId(), click.getEventTime());
+        processedInputMapper.insertProcessedRecord("ad_clicks", click.getPartition(), click.getOffset(),
+                "ad_clicks", click.getClickId(), click.getEventTime());
     }
 
     /**
@@ -219,12 +222,12 @@ public class JoinEngine {
         boolean isTooLate = watermarkTracker.isTooLate(partitionNo, pageView.getEventTime());
         if (isTooLate){
             log.info("Page view {} is too late for partition {}. Watermark: {}", pageView.getEventId(), partitionNo, watermarkTracker.getWatermark(partitionNo));
-            processedInputMapper.insertLateRecord("page_view", pageView.getPartition(), pageView.getOffset(),
-                    "page_view", pageView.getEventId(), pageView.getEventTime());
+            processedInputMapper.insertLateRecord("page_views", pageView.getPartition(), pageView.getOffset(),
+                    "page_views", pageView.getEventId(), pageView.getEventTime());
             return;
         }
 
-        pendingPageViewMapper.insertIfAbsent("page_view", pageView);
+        pendingPageViewMapper.insertIfAbsent("page_views", pageView);
         watermarkStateMapper.upsertObserved(partitionNo, pageView.getEventTime(), Instant.now());
 
         PendingPageview pending = pendingPageView.computeIfAbsent(partitionNo, key -> {
@@ -238,8 +241,8 @@ public class JoinEngine {
         // handling pageview
         findAttributionForPendingViews(partitionNo);
 
-        processedInputMapper.insertProcessedRecord("page_view", pageView.getPartition(), pageView.getOffset(),
-                "page_view", pageView.getEventId(), pageView.getEventTime());
+        processedInputMapper.insertProcessedRecord("page_views", pageView.getPartition(), pageView.getOffset(),
+                "page_views", pageView.getEventId(), pageView.getEventTime());
     }
 
 
@@ -284,6 +287,9 @@ public class JoinEngine {
         }
 
     }
+
+
+    // TODO: Add scheduled watermark advancement for idle partitions
 
     /**
      * Calculate the pageviews before watermark in the current partition.
