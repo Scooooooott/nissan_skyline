@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS processed_input (
                                                offset_no INTEGER NOT NULL,
 
                                                event_type TEXT NOT NULL
-                                               CHECK (event_type IN ('PAGE_VIEW', 'AD_CLICK')),
+                                               CHECK (event_type IN ('page_view', 'ad_click')),
 
     -- PAGE_VIEW uses event_id; AD_CLICK uses click_id.
     event_key TEXT,
