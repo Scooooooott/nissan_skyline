@@ -147,9 +147,19 @@ public class ProcessedInputMapper {
                                     String eventType, String eventKey, Instant eventTime) {
         Instant processedAt = Instant.now();
 
-        boolean inserted = insertTerminalRecord(topic, partition, offset, eventType,
+        insertTerminalRecord(topic, partition, offset, eventType,
                 eventKey, eventTime, "DROPPED_LATE", processedAt, processedAt );
     }
 
+    /**
+     * Insert PROCESSED records
+     */
+    public void insertProcessedRecord(String topic, int partition, long offset,
+                                      String eventType, String eventKey, Instant eventTime) {
+        Instant processedAt = Instant.now();
+
+        insertTerminalRecord(topic, partition, offset, eventType,
+                eventKey, eventTime, "PROCESSED", processedAt, processedAt);
+    }
 
 }

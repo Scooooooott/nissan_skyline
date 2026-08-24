@@ -30,6 +30,7 @@ output:
     journal-mode: WAL
     synchronous: FULL
     busy-timeout-ms: 5000
+    click-state-migration-interval-ms: 60000
 
 # Watermark Configuration
 watermark:

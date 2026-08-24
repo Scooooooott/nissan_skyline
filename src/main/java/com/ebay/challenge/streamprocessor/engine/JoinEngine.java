@@ -38,9 +38,14 @@ import java.util.concurrent.locks.ReentrantLock;
  *   within 30 minutes before the page view (in event time)
  * - Handle out-of-order arrivals through watermark tracking
  *
- * TODO: logs and re-check
- * TODO: add lock to partition to ensure sequential?
- * TODO: or separate the partition of click and pageview (click1, pageview1) instead of partition1?
+ * TODO(recovery): after a transaction rollback, invalidate/reload the affected
+ * partition's in-memory click, watermark, and pending-page-view state from DB
+ * before Kafka retries the record.
+ * TODO(idempotency): handle ClickStateMapper's INSERTED/REPLAY/DUPLICATE/CONFLICT
+ * result explicitly; conflicting input must not mutate memory, must go to DLQ,
+ * and a replay of an EVICTED row must be terminal without restoring it to memory.
+ * TODO(partitioning): support independent topic partitioning and idle-partition
+ * watermark coordination instead of relying on the current same-partition assumption.
  * <p>
  * ! IMPORTANT !
  * Based on the interface declaration and data_generator.py: This implementation assumes that both topics(click and view)
@@ -96,7 +101,7 @@ public class JoinEngine {
             watermarkTracker.restoreWatermark(state.partition(), state.maxEventTime());
         }
 
-        // restore clicks later than watermarks
+        // restore ACTIVE clicks later than watermarks
         List<AdClickEvent> activeClicks = clickStateMapper.findAllActive();
         for (AdClickEvent click : activeClicks) {
             clickStore.restoreClick(click);
@@ -157,13 +162,13 @@ public class JoinEngine {
         if (isTooLate){
             log.info("Click {} is too late for partition {} to process. The newest watermark for this partition is {}. Click information is: {}",
                     click.getClickId(), partitionNo, watermarkTracker.getWatermark(partitionNo), click);
-            processedInputMapper.insertLateRecord("ad_clicks", click.getPartition(), click.getOffset(),
-                    "ad_clicks", click.getClickId(), click.getEventTime());
+            processedInputMapper.insertLateRecord("ad_click", click.getPartition(), click.getOffset(),
+                    "ad_click", click.getClickId(), click.getEventTime());
             return;
         }
 
-        // permanatize record
-        clickStateMapper.insertIfAbsent("ad_clicks", click);
+        // todo: handle INSERTED/REPLAY/DUPLICATE/CONFLICT before updating memory.
+        clickStateMapper.insertIfAbsent("ad_click", click);
         watermarkStateMapper.upsertObserved(partitionNo, click.getEventTime(), Instant.now());
 
         // update memory
@@ -172,6 +177,9 @@ public class JoinEngine {
 
         // handling pageview, output
         findAttributionForPendingViews(partitionNo);
+
+        processedInputMapper.insertProcessedRecord("ad_click", click.getPartition(), click.getOffset(),
+                "ad_click", click.getClickId(), click.getEventTime());
     }
 
     /**
@@ -211,12 +219,12 @@ public class JoinEngine {
         boolean isTooLate = watermarkTracker.isTooLate(partitionNo, pageView.getEventTime());
         if (isTooLate){
             log.info("Page view {} is too late for partition {}. Watermark: {}", pageView.getEventId(), partitionNo, watermarkTracker.getWatermark(partitionNo));
-            processedInputMapper.insertLateRecord("page_views", pageView.getPartition(), pageView.getOffset(),
-                    "page_views", pageView.getEventId(), pageView.getEventTime());
+            processedInputMapper.insertLateRecord("page_view", pageView.getPartition(), pageView.getOffset(),
+                    "page_view", pageView.getEventId(), pageView.getEventTime());
             return;
         }
 
-        pendingPageViewMapper.insertIfAbsent("page_views", pageView);
+        pendingPageViewMapper.insertIfAbsent("page_view", pageView);
         watermarkStateMapper.upsertObserved(partitionNo, pageView.getEventTime(), Instant.now());
 
         PendingPageview pending = pendingPageView.computeIfAbsent(partitionNo, key -> {
@@ -229,23 +237,26 @@ public class JoinEngine {
 
         // handling pageview
         findAttributionForPendingViews(partitionNo);
+
+        processedInputMapper.insertProcessedRecord("page_view", pageView.getPartition(), pageView.getOffset(),
+                "page_view", pageView.getEventId(), pageView.getEventTime());
     }
 
 
     /**
      * Scheduled task to evict old clicks from state.
      * Runs every 30 seconds to prevent unbounded memory growth.
-     *
+     * <p>
      * - Evict clicks older than the watermark cutoff
      * - Use clickStore.evictOldClicks() with appropriate cutoff time
-     *
+     * <p>
      * clickStore.evictOldClicks() is a cross-partition deletion, watermark storage is partition-based,
      * I choose to use global_minimum_watermark to prevent asynchronous watermark updates between partitions
      * to prevent to delete of events that should have been retained.
      * A lazy flag could be considered to apply for each partition, thus global_minimum_watermark would only
      * select the minimum watermark of the ACTIVE partition as the basis for evict.
-     *
-     * For large data, time-based indexes or sth can be used to reduce the cost of iterating every 30 seconds.
+     * <p>
+     * For large data, time-based indexes or sth can be used to reduce the cost of iterating every [configured interval].
      */
     @Scheduled(fixedRate = 30000)
     public void evictOldClicks() {
@@ -264,6 +275,7 @@ public class JoinEngine {
 
             Instant cutoff = globalWatermark.minus(watermarkTracker.getAllowedLateness()).minus(Duration.ofMinutes(30));
 
+            Integer migratedCount = transactionTemplate.execute(status -> clickStateMapper.markOlderThanEvicted(cutoff));
             int evictedCount = clickStore.evictOldClicks(cutoff);
             log.debug("State eviction done. Global watermark: {}, cutoff: {}, evicted clicks: {}", globalWatermark, cutoff, evictedCount);
 
@@ -272,7 +284,6 @@ public class JoinEngine {
         }
 
     }
-
 
     /**
      * Calculate the pageviews before watermark in the current partition.

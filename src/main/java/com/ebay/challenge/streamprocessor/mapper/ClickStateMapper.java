@@ -132,13 +132,22 @@ public class ClickStateMapper {
         return jdbcTemplate.query(sql, ROW_MAPPER);
     }
 
-    public int deleteOlderThan(Instant cutoffTime) {
+    /**
+     * UPDATE evicted clicks in db
+     */
+    public int markOlderThanEvicted(Instant cutoffTime) {
+        Instant updatedAt = Instant.now();
         return jdbcTemplate.update(
                 """
-                DELETE FROM click_state
+                UPDATE click_state
+                SET state_status = 'EVICTED',
+                    updated_at = ?,
+                    updated_at_epoch_ms = ?
                 WHERE state_status = 'ACTIVE'
                   AND event_time_epoch_ms < ?
                 """,
+                updatedAt.toString(),
+                updatedAt.toEpochMilli(),
                 cutoffTime.toEpochMilli()
         );
     }

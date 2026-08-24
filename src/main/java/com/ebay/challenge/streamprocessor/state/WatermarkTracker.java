@@ -23,7 +23,6 @@ import java.util.concurrent.ConcurrentHashMap;
  * until a later event advances the watermark. Idle-partition detection could be considered as TODO.
  * <p>
  * */
-// TODO: Persist or restore partition watermarks for restart safety.
 @Slf4j
 @Component
 public class WatermarkTracker {
