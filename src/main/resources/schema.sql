@@ -59,10 +59,8 @@ CREATE TABLE IF NOT EXISTS processed_input (
     processed_at TEXT,
     processed_at_epoch_ms INTEGER,
 
-    PRIMARY KEY (topic, partition_no, offset_no),
-
+    PRIMARY KEY (topic, partition_no, offset_no)
     -- NULL event_key is allowed for malformed messages.
-    UNIQUE (topic, event_key)
     );
 
 CREATE INDEX IF NOT EXISTS idx_processed_input_status
@@ -70,6 +68,9 @@ CREATE INDEX IF NOT EXISTS idx_processed_input_status
 
 CREATE INDEX IF NOT EXISTS idx_processed_input_event_time
     ON processed_input(event_time_epoch_ms);
+
+CREATE INDEX IF NOT EXISTS idx_processed_input_event_key
+    ON processed_input(topic, event_key);
 
 
 CREATE TABLE IF NOT EXISTS processed_input_history (
@@ -109,9 +110,7 @@ CREATE TABLE IF NOT EXISTS processed_input_history (
     archived_at_epoch_ms INTEGER NOT NULL
     DEFAULT (CAST(strftime('%s', 'now') AS INTEGER) * 1000),
 
-    PRIMARY KEY (topic, partition_no, offset_no),
-
-    UNIQUE (topic, event_key)
+    PRIMARY KEY (topic, partition_no, offset_no)
     );
 
 CREATE INDEX IF NOT EXISTS idx_processed_input_history_status
@@ -123,6 +122,8 @@ CREATE INDEX IF NOT EXISTS idx_processed_input_history_event_time
 CREATE INDEX IF NOT EXISTS idx_processed_input_history_archived_at
     ON processed_input_history(archived_at_epoch_ms);
 
+CREATE INDEX IF NOT EXISTS idx_processed_input_history_event_key
+    ON processed_input_history(topic, event_key);
 
 CREATE TABLE IF NOT EXISTS click_state (
                                            click_id TEXT PRIMARY KEY NOT NULL,
