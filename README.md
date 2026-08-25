@@ -1,3 +1,6 @@
+This project utilized generative AI to some extent. For details on the contribution ratio of generative AI and human intervention in the project, please see `Gen-AI disclosure.md`
+
+
 ## I. Project Overview and Implementation Scope
 
 This project implements a stateful real-time stream processor for attributing page-view events to advertising clicks. It consumes `page_views` and `ad_clicks` from Kafka and, for each page view, selects the most recent click from the same user within the preceding 30-minute event-time window.
