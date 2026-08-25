@@ -62,19 +62,6 @@ public class PendingPageViewMapper {
         ) == 1;
     }
 
-    public Optional<PageViewEvent> findByPageViewId(String pageViewId) {
-        String sql = """
-                SELECT *
-                FROM pending_page_view
-                WHERE page_view_id = ?
-                  AND pending_status = 'PENDING'
-                """;
-
-        return jdbcTemplate.query(sql, ROW_MAPPER, pageViewId)
-                .stream()
-                .findFirst();
-    }
-
     public List<PageViewEvent> findAllPending() {
         String sql = """
                 SELECT *
@@ -96,13 +83,6 @@ public class PendingPageViewMapper {
                 WHERE page_view_id = ?
                   AND pending_status = 'PENDING'
                 """,
-                pageViewId
-        );
-    }
-
-    public int deleteByPageViewId(String pageViewId) {
-        return jdbcTemplate.update(
-                "DELETE FROM pending_page_view WHERE page_view_id = ?",
                 pageViewId
         );
     }

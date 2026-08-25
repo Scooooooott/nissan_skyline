@@ -98,22 +98,6 @@ public class DeadLetterEventMapper {
         ) == 1;
     }
 
-    public List<DeadLetterEvent> findAll() {
-        return jdbcTemplate.query(
-                "SELECT * FROM dead_letter_event ORDER BY created_at_epoch_ms",
-                ROW_MAPPER
-        );
-    }
-
-    public long count() {
-        Long result = jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM dead_letter_event",
-                Long.class
-        );
-
-        return result == null ? 0L : result;
-    }
-
     private static Instant nullableInstant(Object value) {
         if (value == null) {
             return null;

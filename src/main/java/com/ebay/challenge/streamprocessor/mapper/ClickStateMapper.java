@@ -109,12 +109,6 @@ public class ClickStateMapper {
         return CONFLICT;
     }
 
-    public Optional<AdClickEvent> findByClickId(String clickId) {
-        return findByClickIdIncludingInactive(clickId)
-                .filter(existing -> "ACTIVE".equals(existing.stateStatus()))
-                .map(StoredClick::click);
-    }
-
     public Optional<StoredClick> findByClickIdIncludingInactive(String clickId) {
         String stateSql = """
                 SELECT *
@@ -136,18 +130,6 @@ public class ClickStateMapper {
         return jdbcTemplate.query(historySql, HISTORY_ROW_MAPPER, clickId)
                 .stream()
                 .findFirst();
-    }
-
-    public List<AdClickEvent> findActiveByUserId(String userId) {
-        String sql = """
-                SELECT *
-                FROM click_state
-                WHERE user_id = ?
-                  AND state_status = 'ACTIVE'
-                ORDER BY event_time_epoch_ms, click_id
-                """;
-
-        return jdbcTemplate.query(sql, ROW_MAPPER, userId);
     }
 
     public List<AdClickEvent> findAllActive() {

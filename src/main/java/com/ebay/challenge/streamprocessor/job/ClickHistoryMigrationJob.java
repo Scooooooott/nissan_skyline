@@ -34,9 +34,9 @@ public class ClickHistoryMigrationJob {
 
     /**
      * default: 60 min
-     * can be configged by key: click-history.migration-interval-ms.
+     * can be configged by key: output.database.click-state-migration-interval-ms.
      */
-    @Scheduled(fixedRateString = "${click-history.migration-interval-ms:3600000}")
+    @Scheduled(fixedRateString = "${output.database.click-state-migration-interval-ms:3600000}")
     public void migrateExpiredClickHistory() {
         Lock writeLock = stateAccessLock.writeLock();
         writeLock.lock();

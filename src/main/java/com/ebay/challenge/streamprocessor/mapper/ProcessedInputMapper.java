@@ -130,19 +130,6 @@ public class ProcessedInputMapper {
                 .findFirst();
     }
 
-    public Optional<ProcessedInput> findByEventKey(String topic, String eventKey) {
-        String sql = """
-                SELECT *
-                FROM processed_input
-                WHERE topic = ?
-                  AND event_key = ?
-                """;
-
-        return jdbcTemplate.query(sql, ROW_MAPPER, topic, eventKey)
-                .stream()
-                .findFirst();
-    }
-
     private static Instant nullableInstant(ResultSet rs, String column) throws SQLException {
         long epochMillis = rs.getLong(column);
         return rs.wasNull() ? null : Instant.ofEpochMilli(epochMillis);

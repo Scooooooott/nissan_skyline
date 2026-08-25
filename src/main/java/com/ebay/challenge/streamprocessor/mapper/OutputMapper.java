@@ -9,7 +9,6 @@ import org.springframework.util.CollectionUtils;
 
 import java.time.Instant;
 import java.util.List;
-import java.util.Optional;
 
 /**
  * Mapper for table attributed_page_view
@@ -83,29 +82,4 @@ public class OutputMapper {
         return results.getFirst();
     }
 
-    public List<AttributedPageView> findAll() {
-        String sql = """
-                SELECT
-                    page_view_id,
-                    user_id,
-                    event_time,
-                    event_time_epoch_ms,
-                    url,
-                    attributed_campaign_id,
-                    attributed_click_id
-                FROM attributed_page_view
-                ORDER BY event_time_epoch_ms, page_view_id
-                """;
-
-        return jdbcTemplate.query(sql, ROW_MAPPER);
-    }
-
-    public long count() {
-        Long result = jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM attributed_page_view",
-                Long.class
-        );
-
-        return result == null ? 0L : result;
-    }
 }

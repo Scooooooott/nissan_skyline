@@ -2,9 +2,7 @@ package com.ebay.challenge.streamprocessor.infrastructure;
 
 import org.springframework.stereotype.Component;
 
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**

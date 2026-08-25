@@ -79,16 +79,6 @@ public class WatermarkStateMapper {
         );
     }
 
-    public Optional<WatermarkState> findByPartition(int partition) {
-        return jdbcTemplate.query(
-                        "SELECT * FROM watermark_state WHERE partition_no = ?",
-                        ROW_MAPPER,
-                        partition
-                )
-                .stream()
-                .findFirst();
-    }
-
     public List<WatermarkState> findAll() {
         return jdbcTemplate.query(
                 "SELECT * FROM watermark_state ORDER BY partition_no",
@@ -96,34 +86,4 @@ public class WatermarkStateMapper {
         );
     }
 
-    public Optional<Instant> findGlobalMinimumWatermark() {
-        List<Long> results = jdbcTemplate.query(
-                "SELECT MIN(max_event_time_epoch_ms) FROM watermark_state",
-                (rs, rowNum) -> {
-                    long value = rs.getLong(1);
-                    return rs.wasNull() ? null : value;
-                }
-        );
-
-        return results.stream()
-                .filter(value -> value != null)
-                .findFirst()
-                .map(Instant::ofEpochMilli);
-    }
-
-    public int updateStatus(int partition, String status, Instant updatedAt) {
-        return jdbcTemplate.update(
-                """
-                UPDATE watermark_state
-                SET watermark_status = ?,
-                    updated_at = ?,
-                    updated_at_epoch_ms = ?
-                WHERE partition_no = ?
-                """,
-                status,
-                updatedAt.toString(),
-                updatedAt.toEpochMilli(),
-                partition
-        );
-    }
 }

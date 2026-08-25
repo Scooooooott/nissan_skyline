@@ -4,6 +4,7 @@ import com.ebay.challenge.streamprocessor.model.AdClickEvent;
 import io.micrometer.common.util.StringUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import org.springframework.util.CollectionUtils;
 import org.springframework.util.ObjectUtils;
 
 import java.time.Duration;
@@ -181,6 +182,10 @@ public class ClickStateStore {
 
         for (String userId : clickHashMap.keySet()){
             clickHashMap.computeIfPresent(userId, (key, clicks) -> {
+                if (CollectionUtils.isEmpty(clicks)){
+                    return null;
+                }
+
                 Iterator<AdClickEvent> iterator = clicks.iterator();
 
                 while(iterator.hasNext()){
