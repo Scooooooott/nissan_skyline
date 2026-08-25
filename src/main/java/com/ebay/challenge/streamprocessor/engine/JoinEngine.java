@@ -16,17 +16,14 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
+import com.ebay.challenge.streamprocessor.model.MemoryStateChanges;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.ObjectUtils;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -119,7 +116,7 @@ public class JoinEngine {
         List<Integer> partitions = new ArrayList<>(pendingPageView.keySet());
         partitions.sort(Integer::compareTo);
         for (Integer partition : partitions) {
-            findAttributionForPendingViews(partition);
+            findAttributionForPendingViews(partition, watermarkTracker.getWatermark(partition), null, null, null);
         }
     }
 
@@ -145,18 +142,28 @@ public class JoinEngine {
         readLock.lock();
         partitionLock.lock();
 
+        MemoryStateChanges memoryChanges = new MemoryStateChanges(partitionNo);
+
         try {
-            return transactionTemplate.execute(status -> processClickInTransaction(partitionNo, click));
-        } catch (Exception e) {
-            // todo: reloadAfterRollback
-            throw e;
+            // read watermark before processing
+            Instant watermarkBefore = watermarkTracker.getWatermark(partitionNo);
+
+            // process
+            String result = transactionTemplate.execute(status ->
+                    processClickInTransaction(partitionNo, click, watermarkBefore, memoryChanges));
+
+            // transaction submitted, then apply to memory
+            memoryChanges.applyToMemory(clickStore, watermarkTracker, pendingPageView);
+
+            return result;
         } finally {
             partitionLock.unlock();
             readLock.unlock();
         }
     }
 
-    private String processClickInTransaction(int partitionNo, AdClickEvent click) {
+    private String processClickInTransaction(int partitionNo, AdClickEvent click,
+                                             Instant watermarkBefore, MemoryStateChanges memoryChanges) {
         log.debug("Processing click: {}", click.getClickId());
 
         // if this msg is comsumed and finished before
@@ -174,7 +181,7 @@ public class JoinEngine {
             return handleExistingClick(existingStatus.get(), click);
         }
 
-        boolean isTooLate = watermarkTracker.isTooLate(partitionNo, click.getEventTime());
+        boolean isTooLate = click.getEventTime().isBefore(watermarkBefore);
         if (isTooLate){
             log.info("Click {} is too late for partition {} to process. The newest watermark for this partition is {}. Click information is: {}",
                     click.getClickId(), partitionNo, watermarkTracker.getWatermark(partitionNo), click);
@@ -192,12 +199,17 @@ public class JoinEngine {
         watermarkStateMapper.upsertObserved(partitionNo, click.getEventTime(), Instant.now());
 
         // update memory
-        clickStore.addClick(click);
-        watermarkTracker.updateWatermark(partitionNo, click.getEventTime());
+        memoryChanges.stageClick(click);
+        memoryChanges.stageWatermark(click.getEventTime());
+
+        // calculate new watermark
+        Instant eventWatermark = click.getEventTime().minus(watermarkTracker.getAllowedLateness());
+        Instant watermarkAfter = watermarkBefore.isAfter(eventWatermark) ? watermarkBefore : eventWatermark;
 
         // handling pageview, output
-        findAttributionForPendingViews(partitionNo);
+        findAttributionForPendingViews(partitionNo, watermarkAfter, memoryChanges, null, click);
 
+        // finish, insert a record to db
         processedInputMapper.insertProcessedRecord("ad_clicks", click.getPartition(), click.getOffset(),
                 "ad_clicks", click.getClickId(), click.getEventTime());
 
@@ -238,21 +250,29 @@ public class JoinEngine {
         readLock.lock();
         partitionLock.lock();
 
+        MemoryStateChanges memoryChanges = new MemoryStateChanges(partitionNo);
+
         try {
-            transactionTemplate.executeWithoutResult(status -> processPageViewInTransaction(partitionNo, pageView));
-        } catch (Exception e) {
-            // todo: reloadAfterRollback
-            throw e;
+            // get watermark
+            Instant watermarkBefore = watermarkTracker.getWatermark(partitionNo);
+
+            // do process in a transaction
+            // only db, use a copy of memory
+            transactionTemplate.executeWithoutResult(status -> processPageViewInTransaction(partitionNo, pageView, watermarkBefore, memoryChanges));
+
+            // after successfully handled, apply to memory
+            memoryChanges.applyToMemory(clickStore, watermarkTracker, pendingPageView);
         } finally {
             partitionLock.unlock();
             readLock.unlock();
         }
     }
 
-    private void processPageViewInTransaction(int partitionNo, PageViewEvent pageView) {
+    private void processPageViewInTransaction(int partitionNo, PageViewEvent pageView,
+                                              Instant watermarkBefore, MemoryStateChanges memoryChanges) {
         log.debug("Processing page view: {}", pageView.getEventId());
 
-        boolean isTooLate = watermarkTracker.isTooLate(partitionNo, pageView.getEventTime());
+        boolean isTooLate = pageView.getEventTime().isBefore(watermarkBefore);
         if (isTooLate){
             log.info("Page view {} is too late for partition {}. Watermark: {}", pageView.getEventId(), partitionNo, watermarkTracker.getWatermark(partitionNo));
             processedInputMapper.insertLateRecord("page_views", pageView.getPartition(), pageView.getOffset(),
@@ -263,16 +283,14 @@ public class JoinEngine {
         pendingPageViewMapper.insertIfAbsent("page_views", pageView);
         watermarkStateMapper.upsertObserved(partitionNo, pageView.getEventTime(), Instant.now());
 
-        PendingPageview pending = pendingPageView.computeIfAbsent(partitionNo, key -> {
-            return new PendingPageview();
-        });
+        memoryChanges.stagePendingPageView(pageView);
+        memoryChanges.stageWatermark(pageView.getEventTime());
 
-        pending.add(pageView);
-
-        watermarkTracker.updateWatermark(partitionNo, pageView.getEventTime());
+        Instant eventWatermark = pageView.getEventTime().minus(watermarkTracker.getAllowedLateness());
+        Instant watermarkAfter = watermarkBefore.isAfter(eventWatermark) ? watermarkBefore : eventWatermark;
 
         // handling pageview
-        findAttributionForPendingViews(partitionNo);
+        findAttributionForPendingViews(partitionNo, watermarkAfter, memoryChanges, pageView, null);
 
         processedInputMapper.insertProcessedRecord("page_views", pageView.getPartition(), pageView.getOffset(),
                 "page_views", pageView.getEventId(), pageView.getEventTime());
@@ -321,28 +339,38 @@ public class JoinEngine {
 
     }
 
-
-    // TODO: Add scheduled watermark advancement for idle partitions
-
     /**
      * Calculate the pageviews before watermark in the current partition.
      * insert handled data into db
+     * <p>
+     * This is processed with a COPY of memory, thus, even db error, the records in memory will not get lost unexpectedly.
      * */
-    private void findAttributionForPendingViews(int partitionNo) {
+    private void findAttributionForPendingViews(int partitionNo, Instant watermark,
+                                                MemoryStateChanges memoryChanges, PageViewEvent pageViewToAdd, AdClickEvent clickToAdd) {
         PendingPageview pending = pendingPageView.get(partitionNo);
 
-        // no pending pageviews
-        if (pending == null || CollectionUtils.isEmpty(pending.getPageviews())) {
+        // no pageviews (pending or to handle)
+        if (pending == null && pageViewToAdd == null) {
             return;
         }
 
-        Instant watermark = watermarkTracker.getWatermark(partitionNo);
+        // put all pending pageview into candidate
+        TreeSet<PageViewEvent> candidates = new TreeSet<>(Comparator.comparing(PageViewEvent::getEventTime)
+                .thenComparing(PageViewEvent::getEventId));
 
-        // for list, handle
-        Iterator<PageViewEvent> iterator = pending.getPageviews().iterator();
-        while (iterator.hasNext()) {
-            PageViewEvent pageView = iterator.next();
+        if (pending != null) {
+            candidates.addAll(pending.getPageviews());
+        }
+        if (pageViewToAdd != null) {
+            candidates.add(pageViewToAdd);
+        }
 
+        if (CollectionUtils.isEmpty(candidates)) {
+            return;
+        }
+
+        // for settree, handle
+        for (PageViewEvent pageView : candidates) {
             // PendingPageview ordered by event_time, stop when after watermark
             if (pageView.getEventTime().isAfter(watermark)) {
                 break;
@@ -350,30 +378,63 @@ public class JoinEngine {
 
             AdClickEvent attributableClick = clickStore.findAttributableClick(pageView.getUserId(), pageView.getEventTime());
 
+            // new click is not stored, needs to be checked separately
+            Instant pageViewTime = pageView.getEventTime();
+            // check if the new click is a candidate
+            // click: not null, same user, in pageview's window
+            boolean clickIsCandidate = clickToAdd != null
+                            && clickToAdd.getUserId().equals(pageView.getUserId())
+                            && !clickToAdd.getEventTime().isAfter(pageViewTime)
+                            && !clickToAdd.getEventTime().isBefore(pageViewTime.minus(Duration.ofMinutes(30)));
+
+            // when the new click is a candidate, check if it is newest one
+            if (clickIsCandidate) {
+                // no return attributable click
+                // or new click is newer than any returned
+                boolean clickIsMoreRecent = (attributableClick == null)
+                                || (clickToAdd.getEventTime() .isAfter(attributableClick.getEventTime()));
+
+                // if so, input is the attribution one
+                if (clickIsMoreRecent) {
+                    attributableClick = clickToAdd;
+                }
+            }
+
+            // Dto
             AttributedPageView attributedPageView = AttributedPageView.builder()
-                            .pageViewId(pageView.getEventId())
-                            .userId(pageView.getUserId())
-                            .eventTime(pageView.getEventTime())
-                            .url(pageView.getUrl())
-                            .attributedCampaignId(ObjectUtils.isEmpty(attributableClick) ? null : attributableClick.getCampaignId())
-                            .attributedClickId(ObjectUtils.isEmpty(attributableClick) ? null : attributableClick.getClickId())
-                            .build();
+                    .pageViewId(pageView.getEventId())
+                    .userId(pageView.getUserId())
+                    .eventTime(pageView.getEventTime())
+                    .url(pageView.getUrl())
+                    .attributedCampaignId(ObjectUtils.isEmpty(attributableClick) ? null : attributableClick.getCampaignId())
+                    .attributedClickId(ObjectUtils.isEmpty(attributableClick) ? null : attributableClick.getClickId())
+                    .build();
 
             // outputted -> remove from pending
             outputSink.write(attributedPageView);
             pendingPageViewMapper.markEmitted(pageView.getEventId());
-            iterator.remove();
+
+            // when there are copy of memory, remove it from this copy
+            if (memoryChanges != null) {
+                memoryChanges.stageRemovePendingPageView(pageView);
+            } else {
+                // no copy of memory, usually recovering from db
+                // remove handled ones
+                if (pending != null) {
+                pending.getPageviews().remove(pageView);
+                }
+            }
 
             log.debug("JoinEngine page_view {} found its click {}", pageView.getEventId(),
-                    attributableClick == null ? null : attributableClick.getClickId());
+                        attributableClick == null ? null : attributableClick.getClickId());
         }
 
-        // no page_view left for this partition, remove it
-        if (pending.getPageviews().isEmpty()) {
+        // when recovering: no page_view left for this partition, remove it
+        // when there are copy of memory, handle it in the copy
+        if (memoryChanges == null && pending != null && pending.getPageviews().isEmpty()) {
             pendingPageView.remove(partitionNo, pending);
         }
     }
-
 
 
 }
