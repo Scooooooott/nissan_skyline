@@ -25,7 +25,7 @@ public class AttributedPageView {
     private String userId;
 
     @JsonProperty("event_time")
-    @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ss", timezone = "UTC")
+    @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ss[XXX]", timezone = "UTC")
     private Instant eventTime;
 
     @JsonProperty("url")
